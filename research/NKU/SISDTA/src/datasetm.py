@@ -1,0 +1,178 @@
+import os
+import json
+import random
+import numpy as np
+
+import mindspore
+
+from src.data.kiba import Kiba
+from src.data.davis import Davis
+from src.data.fdavis import FDavis
+
+handlers = {
+    'kiba': Kiba,
+    'davis': Davis,
+    'fdavis': FDavis,
+}
+RANDOM_STATE = random.randint(1, 100000000)
+
+class MultiDatasetM:
+    def __init__(self, 
+        dataset = 'kiba', train = True, device = 'cpu', 
+        sim_type = 'sis', new = False, d_threshold = 0.6, p_threshold = 0.6,
+        setting = 1, fold = 0
+    ):
+        # super().__init__(None, transform, pre_transform) # 无需预处理与下载
+        print('initalizing {} {} dataset...'.format(dataset, 'train' if train else 'test'))
+        self.dataset = dataset
+        self.device = device
+        self.train = train
+        self.new = new
+        self.handler = handlers[dataset](self.train, sim_type, d_threshold, p_threshold)
+
+        self._check_exists()
+        self.handler._load_data()
+
+        # self.d_vecs = mindspore.tensor(self.handler.d_vecs, dtype=mindspore.float32)
+        # self.d_ecfps = mindspore.tensor(self.handler.d_ecfps, dtype=mindspore.float32)
+        # self.d_sim = mindspore.tensor(self.handler.d_sim, dtype=mindspore.float32)
+        self.d_vecs = self.handler.d_vecs.astype('float32')
+        self.d_ecfps = self.handler.d_ecfps.astype('float32')
+        self.d_sim = self.handler.d_sim
+
+        # self.p_embeddings = mindspore.tensor(self.handler.p_embeddings, dtype=mindspore.float32)
+        self.p_embeddings = self.handler.p_embeddings.astype('float32')
+        go_sum = self.handler.p_gos.sum(axis=0)
+        go_high = np.delete(self.handler.p_gos, np.where(go_sum < 1)[0].tolist(), axis=1)
+        # self.p_gos = mindspore.tensor(go_high, dtype=mindspore.float32)
+        # self.p_sim = mindspore.tensor(self.handler.p_sim, dtype=mindspore.float32)
+        self.p_gos = go_high.astype('float32')
+        self.p_sim = self.handler.p_sim
+        self.dsize = self.d_sim.shape[0]
+        self.psize = self.p_sim.shape[0]
+
+        indexes, y = self._split(setting, fold, self.train)
+
+        print('generating similarity graph...')
+        self.d_ei, self.d_ew = self._matrix(self.d_sim, min = self.handler.d_threshold)
+        self.p_ei, self.p_ew = self._matrix(self.p_sim, min = self.handler.p_threshold)
+        
+        # self.indexes = mindspore.tensor(indexes, dtype=mindspore.uint32)
+        # if not new: self.y = mindspore.tensor(y, dtype=mindspore.float32).view(-1, 1)
+        self.indexes = indexes
+        if not new: self.y = y
+
+    def _split(self, setting, fold, isTrain=True):
+        if hasattr(self.handler, '_split'):
+            res = self.handler._split(setting, fold, isTrain, RANDOM_STATE)
+            if len(res[0]) > 0: return res
+
+        y_durgs, y_proteins = np.where(np.isnan(self.handler.label) == False)
+        
+        if setting == 0:
+            name = self.handler.train_setting1_path if isTrain \
+                else self.handler.test_setting1_path
+
+            with open(name) as f:
+                indices = []
+                if isTrain: 
+                    for item in json.load(f): indices.extend(item)
+                else: indices = json.load(f)
+                indices = np.array(indices).flatten()
+
+            indexes = []
+            y = []
+            drugs = y_durgs[indices]
+            proteins = y_proteins[indices]
+            label = self.handler.label
+            for k in range(len(indices)):
+                i = drugs[k]
+                j = proteins[k]
+                if self.new and (np.isnan(label[i][j]) or label[i][j] == 0.0):
+                    indexes.append([i, j])
+                    continue
+                if np.isnan(label[i][j]) or label[i][j] == 0.0: continue
+                indexes.append([i, j])
+                y.append(label[i][j])
+
+            return (indexes, y)
+        elif setting == 2: # some drugs unseen
+            dsize = self.handler.d_sim.shape[0]
+            folds = []
+            with open(self.handler.setting2_path) as f:
+                folds = json.load(f)
+            
+            drug_indices = ~np.isin(list(range(dsize)), folds[fold])
+            self.drug_indices = drug_indices
+            if self.train:
+                self.handler.label = self.handler.label[drug_indices]
+                self.handler.d_ecfps = self.handler.d_ecfps[drug_indices]
+                self.handler.d_vecs = self.handler.d_vecs[drug_indices]
+                self.handler.d_sim = self.handler.d_sim[drug_indices][:, drug_indices]
+
+                self.handler.drugs, self.handler.proteins = np.where(np.isnan(self.handler.label) == False)
+            else:
+                indices = np.isin(y_durgs, folds[fold])
+                self.handler.drugs, self.handler.proteins = y_durgs[indices], y_proteins[indices]
+        elif setting == 3: # some targets unseen
+            psize = self.handler.p_sim.shape[0]
+            folds = []
+            with open(self.handler.setting3_path) as f:
+                folds = json.load(f)
+
+            protein_indices = ~np.isin(list(range(psize)), folds[fold])
+            self.protein_indices = protein_indices
+            if self.train:
+                self.handler.label = self.handler.label[:, protein_indices]
+                self.handler.p_gos = self.handler.p_gos[protein_indices]
+                self.handler.p_embeddings = self.handler.p_embeddings[protein_indices]
+                self.handler.p_sim = self.handler.p_sim[protein_indices][:, protein_indices]
+                
+                self.handler.drugs, self.handler.proteins = np.where(np.isnan(self.handler.label) == False)
+            else:
+                indices = np.isin(y_proteins, folds[fold])
+                self.handler.drugs, self.handler.proteins = y_durgs[indices], y_proteins[indices]
+
+    def _matrix(self, matrix, neighbor_num=5, min=0.5, max=1.0):
+        size = matrix.shape[0]
+        _i = np.zeros((size, size))
+        _w = np.zeros((size, size))
+        
+        for i in range(size):
+            neighbors = (-matrix[i]).argsort()
+            k = 0
+            r = random.randint(1, neighbor_num)
+            for neighbor in neighbors:
+                if k >= neighbor_num and matrix[i][neighbor] < min: break
+                if matrix[i][neighbor] < max: 
+                    _w[neighbor][i] = matrix[i][neighbor]
+                    _i[neighbor][i] = 1
+                    k += 1
+            _w[i][i] = 1.0
+            _i[i][i] = 1.0
+
+        return mindspore.tensor(_i, dtype=mindspore.float32), \
+            mindspore.tensor(_w, dtype=mindspore.float32)
+
+    def __getitem__(self, index):
+        dindex, pindex = self.indexes[index]
+        res = [
+            dindex, pindex,
+            self.d_vecs[dindex], self.p_embeddings[pindex], 
+        ]
+        
+        if not self.new: res.append(self.y[index])
+        return res
+
+    def __len__(self):
+        return len(self.indexes)
+
+    def _check_exists(self):
+        output_dir = './output/{}/'.format(self.dataset)
+        if not os.path.exists(output_dir):
+            os.makedirs(output_dir)
+
+    @staticmethod
+    def fold_size(setting):
+        if setting == 0: return 1
+        else: return 5
