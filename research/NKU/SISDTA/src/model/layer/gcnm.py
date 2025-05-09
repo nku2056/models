@@ -44,10 +44,10 @@ class GCNM(nn.Cell):
             self.reset_parameters()
 
         # Support computation: x * W
-        support = mint.mm(Tensor(x), self.weight)
+        support = ops.mm(Tensor(x), self.weight)
         
         # Output computation: A * (x * W)
-        output = mint.mm(edge_index, support)
+        output = ops.mm(edge_index, support)
         
         # Add bias if exists
         if self.bias is not None:

@@ -1,6 +1,8 @@
 import mindspore
 from mindspore import mint
 import mindspore.dataset as ds
+from mindspore import nn
+from mindspore.experimental import optim
 
 from tqdm import tqdm
 
@@ -20,29 +22,25 @@ def train_mindspore(args, fold):
     trainLoader = ds.GeneratorDataset(train, shuffle=True, column_names=column_names).batch(args.batch_size)
     testLoader = ds.GeneratorDataset(test, shuffle=False, column_names=column_names).batch(args.batch_size)
 
-    mseLoss = mint.nn.MSELoss()
-    aeMseLoss = mint.nn.MSELoss()
+    mseLoss = nn.MSELoss()
+    aeMseLoss = nn.MSELoss()
     model = GNNM(args.device, args.dropout)
-    optimizer = mint.optim.Adam(model.trainable_params(), lr=args.learning_rate, weight_decay=args.weight_decay)
+    optimizer = optim.Adam(model.trainable_params(), lr=args.learning_rate, weight_decay=args.weight_decay)
 
     def forward_fn(d_index, p_index, d_vecs, p_embeddings, y):
         y_bar, decoded, feature = model(d_index, p_index, d_vecs, p_embeddings, train)
         mse = mseLoss(y, y_bar)
         loss = mse + args.lambda_1 * aeMseLoss(decoded, feature)
-        return loss, mse
-
-    grad_fn = mindspore.value_and_grad(forward_fn, None, optimizer.parameters, has_aux=True)
-
-    def train_step(d_index, p_index, d_vecs, p_embeddings, y):
-        (loss, mse), grads = grad_fn(d_index, p_index, d_vecs, p_embeddings, y)
-        optimizer(grads)
-        return loss, mse
+        return loss, y_bar, decoded, feature
 
     print('training fold {}...'.format(fold))
     for epoch in range(1, args.epochs + 1):
         model.set_train()
         for d_index, p_index, d_vecs, p_embeddings, y in tqdm(trainLoader, leave=False):
-            (trainLoss, trainMse) = train_step(d_index, p_index, d_vecs, p_embeddings, y)
+            grad_fn = mindspore.value_and_grad(forward_fn, None, optimizer.parameters, has_aux=True)
+            (trainLoss, y_bar, decoded, feature), grads = grad_fn(d_index, p_index, d_vecs, p_embeddings, y)
+            trainMse = mseLoss(y, y_bar)
+            optimizer(grads)
         
         if epoch % 10 != 0 and epoch != args.epochs: continue
 

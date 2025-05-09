@@ -3,7 +3,7 @@ import argparse
 class Args:
     def __init__(self, action='train'):
         self.parser = argparse.ArgumentParser()
-        self.parser.add_argument('--device', default='cpu', type=str, metavar=None, 
+        self.parser.add_argument('--device', default='Ascend', type=str, metavar=None, 
             help='Name of the processor used for computing')
         self.parser.add_argument('-d', '--dataset', default='kiba', type=str, metavar='[kiba, davis, fdavis]', 
             help='Name of the selected data set')
